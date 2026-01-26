@@ -62,7 +62,7 @@ const (
 	AnnUploadClientName = "cdi.kubevirt.io/uploadClientName"
 
 	// AnnUploadPod name of the upload pod
-	AnnUploadPod = "cdi.kubevirt.io/storage.uploadPodName"
+	AnnUploadPod = cc.AnnUploadPodName
 
 	annCreatedByUpload = "cdi.kubevirt.io/storage.createdByUploadController"
 

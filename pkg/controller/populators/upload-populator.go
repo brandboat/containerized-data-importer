@@ -20,11 +20,14 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/pkg/errors"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +38,7 @@ import (
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 	cc "kubevirt.io/containerized-data-importer/pkg/controller/common"
 	featuregates "kubevirt.io/containerized-data-importer/pkg/feature-gates"
+	importMetrics "kubevirt.io/containerized-data-importer/pkg/monitoring/metrics/cdi-importer"
 )
 
 const (
@@ -125,10 +129,73 @@ func (r *UploadPopulatorReconciler) updateUploadAnnotations(pvc *corev1.Persiste
 	if _, ok := pvc.Annotations[cc.AnnPVCPrimeName]; !ok {
 		return
 	}
+
+	// Update phase if pod is running
+	phase := pvcPrime.Annotations[cc.AnnPodPhase]
+	if err := r.updateUploadProgress(phase, pvc, pvcPrime); err != nil {
+		r.log.V(3).Error(err, "Error updating upload progress", "error")
+	}
+
 	// Delete the PVC Prime annotation once the pod is succeeded
-	if pvcPrime.Annotations[cc.AnnPodPhase] == string(corev1.PodSucceeded) {
+	if phase == string(corev1.PodSucceeded) {
 		delete(pvc.Annotations, cc.AnnPVCPrimeName)
 	}
+}
+
+func (r *UploadPopulatorReconciler) updateUploadProgress(podPhase string, pvc, pvcPrime *corev1.PersistentVolumeClaim) error {
+	if podPhase == string(corev1.PodSucceeded) {
+		return nil
+	}
+
+	uploadPodName, ok := pvcPrime.Annotations[cc.AnnUploadPodName]
+	if !ok {
+		return nil
+	}
+
+	uploadPod, err := r.getUploadPod(pvcPrime, uploadPodName)
+	if err != nil {
+		return err
+	}
+
+	if uploadPod == nil {
+		return nil
+	}
+
+	// This will only work when the upload pod is running
+	if uploadPod.Status.Phase != corev1.PodRunning {
+		return nil
+	}
+
+	url, err := cc.GetMetricsURL(uploadPod)
+	if url == "" || err != nil {
+		return err
+	}
+
+	// We fetch the current processing phase from the upload pod metrics
+	httpClient = cc.BuildHTTPClient(httpClient)
+	phaseReport, err := cc.GetPhaseReportFromURL(context.TODO(), url, httpClient, importMetrics.ImportPhaseMetricName, string(pvc.UID))
+	if err != nil {
+		return err
+	}
+	if phaseReport != "" {
+		cc.AddAnnotation(pvc, cc.AnnPopulatorPhase, phaseReport)
+	}
+
+	return nil
+}
+
+func (r *UploadPopulatorReconciler) getUploadPod(pvc *corev1.PersistentVolumeClaim, uploadPodName string) (*corev1.Pod, error) {
+	pod := &corev1.Pod{}
+	if err := r.client.Get(context.TODO(), types.NamespacedName{Name: uploadPodName, Namespace: pvc.GetNamespace()}, pod); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return nil, err
+		}
+		return nil, nil
+	}
+	if !metav1.IsControlledBy(pod, pvc) {
+		return nil, errors.Errorf("Pod is not owned by PVC")
+	}
+	return pod, nil
 }
 
 func (r *UploadPopulatorReconciler) reconcileTargetPVC(pvc, pvcPrime *corev1.PersistentVolumeClaim) (reconcile.Result, error) {
@@ -171,6 +238,12 @@ func (r *UploadPopulatorReconciler) reconcileTargetPVC(pvc, pvcPrime *corev1.Per
 	}
 	if cc.IsPVCComplete(pvcPrime) {
 		r.recorder.Eventf(pvc, corev1.EventTypeNormal, uploadSucceeded, fmt.Sprintf(messageUploadSucceeded, pvc.Name))
+		return reconcile.Result{}, nil
+	}
+
+	// Requeue after 2 seconds to update phase while upload is in progress
+	if phase == string(corev1.PodRunning) {
+		return reconcile.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	return reconcile.Result{}, nil

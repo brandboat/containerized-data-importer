@@ -115,6 +115,8 @@ const (
 
 	// AnnPopulatorProgress is a standard annotation that can be used progress reporting
 	AnnPopulatorProgress = AnnAPIGroup + "/storage.populator.progress"
+	// AnnPopulatorPhase is a standard annotation that can be used for phase reporting
+	AnnPopulatorPhase = AnnAPIGroup + "/storage.populator.phase"
 
 	// AnnPreallocationRequested provides a const to indicate whether preallocation should be performed on the PV
 	AnnPreallocationRequested = AnnAPIGroup + "/storage.preallocation.requested"
@@ -361,6 +363,9 @@ const (
 
 	// AnnPVCPrimeName annotation is the name of the PVC' that is used to populate the PV which is then rebound to the target PVC
 	AnnPVCPrimeName = AnnAPIGroup + "/storage.populator.pvcPrime"
+
+	// AnnUploadPod name of the upload pod
+	AnnUploadPodName = "cdi.kubevirt.io/storage.uploadPodName"
 )
 
 // Size-detection pod error codes
@@ -1689,6 +1694,41 @@ func GetProgressReportFromURL(ctx context.Context, url string, httpClient *http.
 		progressReport = match[len(match)-1]
 	}
 	return progressReport, nil
+}
+
+// GetPhaseReportFromURL fetches the phase report from the passed URL according to an specific metric expression and ownerUID
+func GetPhaseReportFromURL(ctx context.Context, url string, httpClient *http.Client, metricExp, ownerUID string) (string, error) {
+	// Match pattern: kubevirt_cdi_import_phase_info{ownerUID="xxx",phase="Convert"} 1
+	regExp := regexp.MustCompile(fmt.Sprintf(`(%s)\{ownerUID=%q,phase="(\w+)"\} 1`, metricExp, ownerUID))
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ErrConnectionRefused(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// Parse the phase from the body
+	phaseReport := ""
+	match := regExp.FindStringSubmatch(string(body))
+	if len(match) >= 3 {
+		phaseReport = match[2] // The phase name is in the second capture group
+	}
+
+	// TODO: remove this debug msg
+	klog.Infof("[bb] Parsed phase: %s", phaseReport)
+	return phaseReport, nil
 }
 
 // UpdateHTTPAnnotations updates the passed annotations for proper http import

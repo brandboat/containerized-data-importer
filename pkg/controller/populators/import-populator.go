@@ -172,6 +172,7 @@ func (r *ImportPopulatorReconciler) reconcileTargetPVC(pvc, pvcPrime *corev1.Per
 		return reconcile.Result{}, err
 	}
 
+	r.log.WithValues("PVC", pvc.Namespace, "Name", pvc.Name).V(1).Info("[bb] Reconciling import populator PVC based on PVC Prime", "phase", phase)
 	switch phase {
 	case string(corev1.PodRunning):
 		if err = cc.MaybeSetPvcMultiStageAnnotation(pvcPrime, r.getCheckpointArgs(source)); err != nil {
@@ -321,6 +322,16 @@ func (r *ImportPopulatorReconciler) updateImportProgress(podPhase string, pvc, p
 
 	// We fetch the import progress from the import pod metrics
 	httpClient = cc.BuildHTTPClient(httpClient)
+
+	// We also fetch the current processing phase from the import pod metrics
+	phaseReport, err := cc.GetPhaseReportFromURL(context.TODO(), url, httpClient, importMetrics.ImportPhaseMetricName, string(pvc.UID))
+	if err != nil {
+		return err
+	}
+	if phaseReport != "" {
+		cc.AddAnnotation(pvc, cc.AnnPopulatorPhase, phaseReport)
+	}
+
 	progressReport, err := cc.GetProgressReportFromURL(context.TODO(), url, httpClient, importMetrics.ImportProgressMetricName, string(pvc.UID))
 	if err != nil {
 		return err
